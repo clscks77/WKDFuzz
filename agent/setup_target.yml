@@ -1,0 +1,85 @@
+- name: Setup target
+  hosts: all
+  vars:
+    vcvars_path: "{{ ansible_env['ProgramFiles'] }}\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat"
+    dest_path: "{{ ansible_env.USERPROFILE }}\\Desktop"
+    wdk_include_km_path: "C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.17763.0\\km"
+    wdk_lib_path: "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.17763.0\\km\\x64"
+    ntoskrnllib_path: "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.17763.0\\km\\x64\\ntoskrnl.lib"
+  tasks:
+    - name: Set default value for target_harness
+      set_fact:
+        target_harness: 'provision_target'
+      when: target_harness is undefined
+    # Install python and library
+    - name: Install Python 3
+      win_chocolatey:
+        name: python
+        version: "3.11.5"
+        state: present
+        source: https://community.chocolatey.org/api/v2/
+
+    - name: Get path to python.exe
+      win_command: where python
+      register: python_path
+
+    - name: Upgrade pip using discovered python
+      win_command: '"{{ python_path.stdout_lines[0] }}" -m pip install --upgrade pip'
+      when: python_path.stdout_lines is defined
+
+    - name: Install impacket using pip
+      win_command: '"{{ python_path.stdout_lines[0] }}" -m pip install impacket'
+
+    - name: Install pyinstall using pip
+      win_command: '"{{ python_path.stdout_lines[0] }}" -m pip install pyinstall'
+    # Install python and library done
+
+    - name: Upload binaries
+      win_copy:
+        src: bin
+        dest: "{{ dest_path }}"
+
+    - name: Run smbd.py at boot
+      win_scheduled_task:
+        name: smbd_server
+        actions:
+          - path: C:\Python311\python.exe
+            arguments: "{{ dest_path }}\\bin\\py\\smbd.py"
+        triggers:
+          - type: boot
+        username: SYSTEM
+        run_level: highest
+        state: present
+
+
+     # win_service cannot create kernel level services
+    - name: Set service to start Call Stack Dump.sys at boot
+      win_command: "sc create hook binPath= {{ dest_path + '/bin/driver/Harness_for_nyx.sys' | ansible.windows.quote }} type= kernel start= auto"
+      register: result
+      failed_when:
+        - result.rc != 0
+        - result.rc != 1073 # service already exists
+
+    # - name: Add smbd to HKLM Run key for autostart (system-wide)
+    #   win_regedit:
+    #     path: HKLM:\Software\Microsoft\Windows\CurrentVersion\Run
+    #     name: smbd
+    #     data: "{{ dest_path }}\\bin\\py\\dist\\smbd"
+    #     type: string
+
+    - name: Set service to start vuln_test to trigger the driver
+      win_service:
+        name: vuln_driver_trigger
+        path: "{{ dest_path }}\\bin\\driver\\vuln_test.exe"
+        start_mode: auto
+    # Execute server Process in the this
+    - name: Set service to Vuln Target
+      win_command: "sc create WDM binPath= {{ dest_path + '/bin/driver/wdm.sys' | ansible.windows.quote }} type= kernel start= auto"
+      register: result_wdm
+      failed_when:
+        - result_wdm.rc != 0
+        - result_wdm.rc != 1073 # service already exists
+    # ## 스페이스바를 써야함...
+      when: target_harness == 'provision_target'
+
+    # - name: HELLO

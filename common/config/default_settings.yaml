@@ -1,0 +1,31 @@
+# kAFL default configuration
+
+# general options
+workdir: /dev/shm/kafl_$USER
+debug: false
+quiet: false
+verbose: false
+processes: 1
+
+# fuzz options
+cpu_offset: 0
+kickstart: 256
+afl_arith_max: 34
+reload: 1
+timeout_soft: 0.001 # 1/1000
+timeout_hard: 4
+payload_size: 131072
+bitmap_size: 65536
+iterations: 5
+
+# default tool paths
+qemu_path: $QEMU_ROOT/x86_64-softmmu/qemu-system-x86_64
+ptdump_path: $LIBXDC_ROOT/build/ptdump_static
+radamsa_path: $RADAMSA_ROOT/bin/radamsa
+# default qemu configuration
+qemu_base: -enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v1,+vmx -no-reboot -netdev user,id=n0,ipv6=off -device rtl8139,netdev=n0 -display none
+# qemu_base: -enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v1,+vmx -no-reboot -netdev tap,id=n0,ifname=tap0,script=no,downscript=no -device rtl8139,netdev=n0 -display none
+# qemu_base: -enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v1,+vmx -no-reboot -netdev bridge,id=n0,br=br0 -device rtl8139,netdev=n0
+qemu_append: nokaslr oops=panic nopti mitigations=off console=ttyS0
+qemu_serial: -device isa-serial,chardev=kafl_serial
+qemu_memory: 256
