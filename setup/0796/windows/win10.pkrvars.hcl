@@ -1,0 +1,7 @@
+vm_name = "win10"
+cpus = "4"
+disk_size = "65536"
+iso_url = "/home/udw/kAFL/iso/CVE-2020-0796 (SMBGhost)/Win10_1909_x64 (build 18363.418)_English.iso"
+iso_checksum_type = "sha256"
+iso_checksum = "01bf1eb643f7e50d0438f4f74fb91468d35cde2c82b07abc1390d47fc6a356be"
+autounattend = "answer_files/10/Autounattend.xml"

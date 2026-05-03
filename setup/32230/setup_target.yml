@@ -1,0 +1,649 @@
+- name: Setup target
+  hosts: all
+  vars:
+    vcvars_path: "{{ ansible_env['ProgramFiles'] }}\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat"
+    dest_path: "C:\\"
+    wdk_include_km_path: "C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.17763.0\\km"
+    wdk_lib_path: "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.17763.0\\km\\x64"
+    ntoskrnllib_path: "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.17763.0\\km\\x64\\ntoskrnl.lib"
+
+    enable_guest: true
+    also_grant_everyone: true            # Guest 외 Everyone도 허용하려면 true
+
+    shared_path: 'C:\Shared'          # NTFS 권한을 줄 폴더 경로
+    share_name:  'Shared'              # (옵션) NullSessionShares에 허용할 공유명
+    guest_rights: 'ReadAndExecute'     # Guest 권한 (ReadAndExecute | Modify | FullControl)
+    anon_rights:  'ReadAndExecute'     # Anonymous 권한 (위와 동일 옵션)
+
+    target_reject_unencrypted: false
+
+    smb_restart_service: true            # 설정 후 LanmanServer 재시작
+    smb_target_shares_exclude:
+      - ADMIN$
+      - C$
+      - IPC$
+      - PRINT$
+    
+    smb_enforce_smb311_dialect: true      # 3.1.1 고정 원치 않으면 false
+    smb_restart_services_only: true       # 변경 시 서비스 재시작, 재부팅 안 함
+
+  tasks:
+    
+    #  signing?
+    - name: "[SMB] 현재 Server/Client 설정 조회"
+      win_shell: |
+        $s = Get-SmbServerConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, EncryptData, RejectUnencryptedAccess, Smb2DialectMin, Smb2DialectMax
+        $c = Get-SmbClientConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, RequireSecureNegotiate, Smb2DialectMin, Smb2DialectMax
+        [PSCustomObject]@{Server=$s; Client=$c} | ConvertTo-Json -Compress
+      args:
+        executable: powershell.exe
+      register: smb_before
+      changed_when: false
+      tags: [smb_signing]
+
+    - name: "[SMB] Server 측 서명/암호화 요구 비활성 + (선택) SMB311 고정"
+      win_shell: |
+        Set-SmbServerConfiguration -RequireSecuritySignature $false -EnableSecuritySignature $false -Confirm:$false
+        Set-SmbServerConfiguration -RejectUnencryptedAccess $false -Confirm:$false
+        Set-SmbServerConfiguration -EncryptData $false -Confirm:$false
+        if ({{ smb_enforce_smb311_dialect | ternary('$true','$false') }}) {
+          Set-SmbServerConfiguration -Smb2DialectMin SMB311 -Smb2DialectMax SMB311 -Force -Confirm:$false
+        }
+        Get-SmbServerConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, EncryptData, RejectUnencryptedAccess, Smb2DialectMin, Smb2DialectMax | ConvertTo-Json -Compress
+      args:
+        executable: powershell.exe
+      register: smb_server_after
+      tags: [smb_signing]
+
+    - name: "[SMB] Client 측 서명 요구/보안협상 요구 비활성 + (선택) SMB311 고정"
+      win_shell: |
+        Set-SmbClientConfiguration -RequireSecuritySignature $false -EnableSecuritySignature $false -Confirm:$false
+        Set-SmbClientConfiguration -RequireSecureNegotiate $false -Confirm:$false
+        if ({{ smb_enforce_smb311_dialect | ternary('$true','$false') }}) {
+          Set-SmbClientConfiguration -Smb2DialectMin SMB311 -Smb2DialectMax SMB311
+        }
+        Get-SmbClientConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, RequireSecureNegotiate, Smb2DialectMin, Smb2DialectMax | ConvertTo-Json -Compress
+      args:
+        executable: powershell.exe
+      register: smb_client_after
+      tags: [smb_signing]
+
+    # - name: "[SMB] 변경 여부 판단"
+    #   set_fact:
+    #     smb_changed: >-
+    #       {{
+    #         (
+    #           (smb_before.stdout | default('{}') | from_json).Server.RequireSecuritySignature
+    #           != (smb_server_after.stdout | default('{}') | from_json).RequireSecuritySignature
+    #         )
+    #         or
+    #         (
+    #           (smb_before.stdout | default('{}') | from_json).Client.RequireSecuritySignature
+    #           != (smb_client_after.stdout | default('{}') | from_json).RequireSecuritySignature
+    #         )
+    #         or
+    #         (
+    #           (smb_before.stdout | default('{}') | from_json).Server.Smb2DialectMin
+    #           != (smb_server_after.stdout | default('{}') | from_json).Smb2DialectMin
+    #         )
+    #         or
+    #         (
+    #           (smb_before.stdout | default('{}') | from_json).Client.Smb2DialectMin
+    #           != (smb_client_after.stdout | default('{}') | from_json).Smb2DialectMin
+    #         )
+    #       }}
+    #   tags: [smb_signing]
+
+    # - name: "[SMB] (선택) 재부팅(서비스 재시작 대신)"
+    #   win_reboot:
+    #     reboot_timeout: 600
+    #   when: smb_changed and (not smb_restart_services_only)
+    #   tags: [smb_signing]
+
+    # - name: "[SMB] 최종 설정 검증/출력"
+    #   win_shell: |
+    #     $s = Get-SmbServerConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, EncryptData, RejectUnencryptedAccess, Smb2DialectMin, Smb2DialectMax
+    #     $c = Get-SmbClientConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, RequireSecureNegotiate, Smb2DialectMin, Smb2DialectMax
+    #     [PSCustomObject]@{Server=$s; Client=$c} | ConvertTo-Json -Compress
+    #   args: { executable: powershell.exe }
+    #   register: smb_final
+    #   changed_when: false
+    #   tags: [smb_signing]
+
+    # - name: "[SMB] 결과 요약 (jmespath 없이)"
+    #   debug:
+    #     msg:
+    #       - "SMB Server: {{ (smb_final.stdout | from_json).Server }}"
+    #       - "SMB Client: {{ (smb_final.stdout | from_json).Client }}"
+    #   tags: [smb_signing]
+    
+    # smb shared and mount
+    - name: Create share folder
+      win_file:
+        path: C:\Shared
+        state: directory
+
+    - name: Setup share folder
+      win_share:
+        name: Shared
+        path: C:\Shared
+        description: "shared folder created by Ansible"
+        full: Everyone
+        state: present
+    
+    # --- Begin: IPC$ anonymous (Null session) access tasks ---
+    - name: Ensure IPC$ is present in NullSessionShares (idempotent)
+      win_shell: |
+        $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+        $name = 'NullSessionShares'
+        try {
+          $cur = (Get-ItemProperty -Path $regPath -Name $name -ErrorAction Stop).$name
+        } catch {
+          $cur = @()
+        }
+        if ($null -eq $cur) { $cur = @() }
+        if (-not ($cur -contains 'IPC$')) {
+          $new = $cur + @('IPC$')
+          Set-ItemProperty -Path $regPath -Name $name -Value $new
+          Write-Output "Added IPC$ to NullSessionShares"
+          exit 0
+        } else {
+          Write-Output "IPC$ already present in NullSessionShares"
+          exit 1
+        }
+      args:
+        executable: powershell.exe
+      register: add_ipc_to_nullshares
+      changed_when: "'Added IPC$' in (add_ipc_to_nullshares.stdout | default(''))"
+      failed_when: false
+
+    - name: Set common NullSessionPipes for anonymous pipe access (idempotent)
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: NullSessionPipes
+        type: multistring
+        data:
+          - browser
+          - spoolss
+          - svcctl
+          - samr
+          - lsarpc
+          - netlogon
+      register: set_null_pipes
+      failed_when: false
+
+    - name: Grant ANONYMOUS LOGON read access to IPC$ share (best-effort)
+      win_shell: |
+        try {
+          Grant-SmbShareAccess -Name 'IPC$' -AccountName 'ANONYMOUS LOGON' -AccessRight Read -Force -ErrorAction Stop
+          Write-Output 'Granted ANONYMOUS LOGON read on IPC$'
+          exit 0
+        } catch {
+          Write-Output "Grant-SmbShareAccess failed or IPC$ not configurable: $($_.Exception.Message)"
+          exit 1
+        }
+      args:
+        executable: powershell.exe
+      register: grant_anonymous_ipc
+      failed_when: false
+
+    - name: Ensure RestrictNullSessAccess = 0 (allow null sessions)
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: RestrictNullSessAccess
+        type: dword
+        data: 0
+      register: set_restrict_null
+      failed_when: false
+
+    - name: Ensure EveryoneIncludesAnonymous = 1 (optional, helps anonymous mapping)
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: EveryoneIncludesAnonymous
+        type: dword
+        data: 1
+      register: set_everyone_includes_anon
+      failed_when: false
+
+    - name: Restart LanmanServer if NullSessionShares or RestrictNullSessAccess changed
+      win_service:
+        name: LanmanServer
+        state: restarted
+      when:
+        - add_ipc_to_nullshares is defined and add_ipc_to_nullshares.stdout is search("Added IPC\\$")
+        - set_restrict_null is changed or add_ipc_to_nullshares is defined
+      tags: [smb_signing]
+
+    - name: Output verification for Null session settings
+      win_shell: |
+        $s = Get-SmbServerConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, RejectUnencryptedAccess, Smb2DialectMin, Smb2DialectMax
+        $nullshares = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' -Name 'NullSessionShares' -ErrorAction SilentlyContinue).NullSessionShares
+        $nullpipes = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' -Name 'NullSessionPipes' -ErrorAction SilentlyContinue).NullSessionPipes
+        [PSCustomObject]@{Server=$s; NullSessionShares=$nullshares; NullSessionPipes=$nullpipes} | ConvertTo-Json -Compress
+      args:
+        executable: powershell.exe
+      register: verify_nullsession
+      changed_when: false
+
+    # - name: Show verification output
+    #   debug:
+    #     msg:
+    #       - "Null session verification: {{ verify_nullsession.stdout | default('') }}"
+    # --- End: IPC$ anonymous tasks ---
+      
+    # guest enable
+    # - name: Ensure Guest account is enabled
+    #   win_user:
+    #     name: Guest
+    #     state: present
+    #     account_disabled: false
+    #   when: enable_guest    
+    # authorization
+    - name: Grant Access this computer from the network
+      win_user_right:
+        name: SeNetworkLogonRight
+        users: >-
+          {{
+            (['Guest'] +
+             (['Everyone'] if also_grant_everyone else []))
+          }}
+        action: add
+
+    - name: Ensure Guest is not denied network logon
+      win_user_right:
+        name: SeDenyNetworkLogonRight
+        users:
+          - Guest
+        action: remove
+
+    # for anonymous access
+    # 1) 익명 허용 공유 지정
+    - name: Allow anonymous to this share via NullSessionShares
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: NullSessionShares
+        type: multistring
+        data:
+          - "{{ share_name }}"
+      register: reg_nullsessionshares
+
+    # 2) ForceGuest 비활성화
+    - name: Disable ForceGuest
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: ForceGuest
+        type: dword
+        data: 0
+      register: reg_forceguest
+      failed_when: false
+
+    # 3) (선택) 공유 권한에 ANONYMOUS LOGON 추가
+    - name: Share ACL - Add ANONYMOUS LOGON (Read)
+      ansible.windows.win_shell: |
+        Grant-SmbShareAccess -Name {{ share_name }} -AccountName "ANONYMOUS LOGON" -AccessRight Read -Force
+      args: { executable: powershell.exe }
+      failed_when: false
+# modimodi
+    # related to run SMB server
+    # - name: Enable SMBv1 Protocol
+    #   win_optional_feature:
+    #     name: SMB1Protocol
+    #     state: present
+
+    - name: Enable File and Printer Sharing (SMB-In)
+      win_firewall_rule:
+        name: File and Printer Sharing (SMB-In)
+        enabled: yes
+        direction: in
+        action: allow
+
+    - name: Enable File and Printer Sharing (SMB-Out)
+      win_firewall_rule:
+        name: File and Printer Sharing (SMB-Out)
+        enabled: yes
+        direction: out
+        action: allow
+
+    - name: Enable SMBDirect rule (optional)
+      win_firewall_rule:
+        name: File and Printer Sharing over SMBDirect (iWARP-In)
+        enabled: yes
+        direction: in
+        action: allow
+      ignore_errors: yes 
+
+    - name: Allow SMB (port 445) on firewall
+      win_firewall_rule:
+        name: "Allow SMB for Loopback"
+        localport: 445
+        protocol: tcp
+        direction: in
+        action: allow
+        profile: 
+          - domain
+          - private
+          - public
+        state: present
+    
+    # - name: Enable File and Printer Sharing group in firewall
+    #   win_shell: |
+    #     Set-NetFirewallRule -DisplayGroup 'File and Printer Sharing' -Enabled True -Profile Any -Action Allow
+
+    - name: Enable all SMB-In firewall rules
+      win_shell: |
+        Get-NetFirewallRule -DisplayName '*SMB-In*' | Set-NetFirewallRule -Enabled True
+
+    # anonymous related setting
+    - name: Ensure LanmanServer loopback access registry key exists
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: RestrictNullSessAccess
+        data: 0
+        type: dword
+        state: present
+
+    # - name: Ensure NullSessionShares is present (optional)
+    #   win_regedit:
+    #     path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+    #     name: NullSessionShares
+    #     data: []
+    #     type: multistring
+    #     state: present
+
+    - name: Set EveryoneIncludesAnonymous to 1
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: EveryoneIncludesAnonymous
+        data: 1
+        type: dword
+
+    - name: Set RestrictAnonymous to 0
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: RestrictAnonymous
+        data: 0
+        type: dword
+
+    # NTFS
+    - name: NTFS - Grant Guest on {{ shared_path }}
+      ansible.windows.win_acl:
+        path: "{{ shared_path }}"
+        user: "Guest"
+        rights: "{{ guest_rights }}"
+        type: allow
+        state: present
+        inherit: "ContainerInherit, ObjectInherit"
+        propagation: "None"
+
+    - name: NTFS - Grant ANONYMOUS LOGON explicitly (SID S-1-5-7)
+      ansible.windows.win_acl:
+        path: "{{ shared_path }}"
+        user: "S-1-5-7"   # NT AUTHORITY\ANONYMOUS LOGON
+        rights: "{{ anon_rights }}"
+        type: allow
+        state: present
+        inherit: "ContainerInherit, ObjectInherit"
+        propagation: "None"
+      # when: not grant_via_everyone
+
+    - name: NTFS - (대안) Everyone에 권한 부여해 Anonymous에 간접 적용
+      ansible.windows.win_acl:
+        path: "{{ shared_path }}"
+        user: "Everyone"
+        rights: "{{ anon_rights }}"
+        type: allow
+        state: present
+        inherit: "ContainerInherit, ObjectInherit"
+        propagation: "None"
+      # when: grant_via_everyone
+
+    # - name: Allow local login with blank passwords  
+    #   win_regedit:
+    #     path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+    #     name: LimitBlankPasswordUse
+    #     data: 0
+    #     type: dword
+    #     state: present
+    
+    - name: Relax null session restriction
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: RestrictNullSessAccess
+        data: 0
+        type: dword
+    
+    - name: "Allow guest access to SMB shares"
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters
+        name: AllowInsecureGuestAuth
+        type: dword
+        data: 1
+    
+    - name: Create file with content directly
+      win_copy:
+        content: |
+          This file was created by Ansible.
+          You can put any text here.
+        dest: C:\Shared\test.txt
+    # --- Begin: Enable null (anonymous) access to spoolss named pipe ---
+    - name: Ensure Print Spooler running
+      win_service:
+        name: Spooler
+        start_mode: auto
+        state: started
+        
+    - name: Add 'spoolss' to NullSessionPipes (idempotent append)
+      win_shell: |
+        $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+        $name = 'NullSessionPipes'
+        try {
+          $cur = (Get-ItemProperty -Path $regPath -Name $name -ErrorAction Stop).$name
+        } catch {
+          $cur = @()
+        }
+        if ($null -eq $cur) { $cur = @() }
+        if (-not ($cur -contains 'spoolss')) {
+          $new = $cur + @('spoolss')
+          Set-ItemProperty -Path $regPath -Name $name -Value $new
+          Write-Output "Added spoolss to NullSessionPipes"
+          exit 0
+        } else {
+          Write-Output "spoolss already present in NullSessionPipes"
+          exit 1
+        }
+      args: { executable: powershell.exe }
+      register: add_spoolss_to_nullpipes
+      changed_when: "'Added spoolss' in (add_spoolss_to_nullpipes.stdout | default(''))"
+      failed_when: false
+
+    - name: (Optional) Ensure IPC$ is in NullSessionShares for named-pipe over SMB
+      win_shell: |
+        $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+        $name = 'NullSessionShares'
+        try {
+          $cur = (Get-ItemProperty -Path $regPath -Name $name -ErrorAction Stop).$name
+        } catch {
+          $cur = @()
+        }
+        if ($null -eq $cur) { $cur = @() }
+        if (-not ($cur -contains 'IPC$')) {
+          $new = $cur + @('IPC$')
+          Set-ItemProperty -Path $regPath -Name $name -Value $new
+          Write-Output "Added IPC$ to NullSessionShares"
+          exit 0
+        } else {
+          Write-Output "IPC$ already present in NullSessionShares"
+          exit 1
+        }
+      args: { executable: powershell.exe }
+      register: add_ipc_to_nullshares_for_spoolss
+      changed_when: "'Added IPC$' in (add_ipc_to_nullshares_for_spoolss.stdout | default(''))"
+      failed_when: false
+
+    - name: Allow anonymous mapping (EveryoneIncludesAnonymous=1, RestrictAnonymous=0)
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: "{{ item.name }}"
+        type: dword
+        data: "{{ item.data }}"
+      loop:
+        - { name: EveryoneIncludesAnonymous, data: 1 }
+        - { name: RestrictAnonymous,       data: 0 }
+
+    - name: Allow null sessions on server service (RestrictNullSessAccess=0)
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: RestrictNullSessAccess
+        type: dword
+        data: 0
+
+    # Print Spooler RPC hardening relax (to avoid privacy-level requirement that can block null)
+    # Policy path (takes precedence if present)
+    - name: Disable RPC privacy requirement for Print Spooler via Policy
+      win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers
+        name: RpcAuthnLevelPrivacyEnabled
+        type: dword
+        data: 0
+      register: policy_rpc_privacy
+
+    # Fallback path (effective setting if policy not used)
+    - name: Disable RPC privacy requirement for Print Spooler (fallback key)
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Print
+        name: RpcAuthnLevelPrivacyEnabled
+        type: dword
+        data: 0
+      register: sys_rpc_privacy
+
+    # Ensure named-pipe protocol is allowed for Spooler RPC
+    - name: Enable RPC named pipe protocol for Spooler
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Print
+        name: RpcUseNamedPipeProtocol
+        type: dword
+        data: 1
+      register: set_rpc_namedpipe
+
+    # # (선택) TCP를 끄고 싶지 않다면 생략 가능. 굳이 끄려면 아래를 0으로 설정.
+    # - name: Ensure RPC over TCP remains enabled for Spooler (optional)
+    #   win_regedit:
+    #     path: HKLM:\SYSTEM\CurrentControlSet\Control\Print
+    #     name: RpcUseTcpProtocol
+    #     type: dword
+    #     data: 1
+    #   register: set_rpc_tcp
+    #   failed_when: false
+
+    # - name: Restart services if settings changed (LanmanServer / Spooler)
+    #   win_service:
+    #     name: "{{ item }}"
+    #     state: restarted
+    #   loop:
+    #     - LanmanServer
+    #     - Spooler
+    #   when: >
+    #     (add_spoolss_to_nullpipes is changed) or
+    #     (add_ipc_to_nullshares_for_spoolss is changed) or
+    #     (policy_rpc_privacy is changed) or
+    #     (sys_rpc_privacy is changed) or
+    #     (set_rpc_namedpipe is changed) or
+    #     (set_rpc_tcp is changed)
+
+    # - name: Verify spoolss anonymous-related settings
+    #   win_shell: |
+    #     $p = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' -ErrorAction SilentlyContinue
+    #     $lsa = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -ErrorAction SilentlyContinue
+    #     $printSys = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Print' -ErrorAction SilentlyContinue
+    #     $printPol = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers' -ErrorAction SilentlyContinue
+    #     $smb = Get-SmbServerConfiguration | Select RequireSecuritySignature, EnableSecuritySignature, RejectUnencryptedAccess
+    #     [PSCustomObject]@{
+    #       SmbServer = $smb
+    #       NullSessionShares = $p.NullSessionShares
+    #       NullSessionPipes  = $p.NullSessionPipes
+    #       Lsa_EveryoneIncludesAnonymous = $lsa.EveryoneIncludesAnonymous
+    #       Lsa_RestrictAnonymous = $lsa.RestrictAnonymous
+    #       Print_RpcAuthnLevelPrivacyEnabled_Policy = $printPol.RpcAuthnLevelPrivacyEnabled
+    #       Print_RpcAuthnLevelPrivacyEnabled_System = $printSys.RpcAuthnLevelPrivacyEnabled
+    #       Print_RpcUseNamedPipeProtocol = $printSys.RpcUseNamedPipeProtocol
+    #       Print_RpcUseTcpProtocol = $printSys.RpcUseTcpProtocol
+    #     } | ConvertTo-Json -Compress
+    #   args: { executable: powershell.exe }
+    #   register: verify_spoolss_null
+    #   changed_when: false
+    
+    # - name: "[SMB] Lanman 서비스 재시작(변경 시)"
+    #   win_service:
+    #     name: "{{ item }}"
+    #     state: restarted
+    #     start_mode: auto
+    #   loop:
+    #     - LanmanServer
+    #     - LanmanWorkstation
+    #   when: smb_changed and smb_restart_services_only
+    #   tags: [smb_signing]
+    # --- End: spoolss null access ---
+
+    # - name: Install Python via Chocolatey
+    #   win_chocolatey:
+    #     name: "python"
+    #     version: "3.11.9"
+    #     state: present
+    #     params: "/InstallAllUsers"
+    #   register: py_install
+   
+    # - name: Upgrade pip to latest
+    #   win_command: "py -m pip install --upgrade pip"
+    #   register: pip_upgrade
+    #   # changed_when: "'Requirement already satisfied' not in (pip_upgrade.stdout | default('')) and 'already up-to-date' not in (pip_upgrade.stdout | default(''))"
+    
+    # - name: Add Defender exclusion for C:\Temp and python
+    #   win_shell: |
+    #     Add-MpPreference -ExclusionPath 'C:\Temp'
+    #     Add-MpPreference -ExclusionProcess 'C:\Python311\python.exe'
+    #   args: { executable: powershell.exe }
+    #   ignore_errors: yes
+    
+    # - name: Install/upgrade impacket (latest)
+    #   win_command: "py -m pip install --upgrade impacket==0.12.0"
+    #   register: impacket_install
+    #   # changed_when: "'Requirement already satisfied' not in (impacket_install.stdout | default('')) and 'already up-to-date' not in (impacket_install.stdout | default(''))"
+
+    # - name: Install/upgrade lznt1 (latest)
+    #   win_command: "py -m pip install --upgrade lznt1"
+    #   register: lznt1_install
+
+    - name: Set default value for target_harness
+      set_fact:
+        target_harness: 'provision_target'
+      when: target_harness is undefined
+
+    - name: Upload binaries
+      win_copy:
+        src: bin
+        dest: "{{ dest_path }}"
+
+     # win_service cannot create kernel level services
+    - name: Set service to start Call Stack Dump.sys at boot
+      win_command: "sc create hook binPath= {{ dest_path + '/bin/driver/Harness_for_nyx.sys' | ansible.windows.quote }} type= kernel start= auto"
+      register: result
+      failed_when:
+        - result.rc != 0
+        - result.rc != 1073 # service already exists
+
+    # Agent append to Service
+    - name: Set service to start vuln_test to trigger the driver
+      win_service:
+        name: vuln_driver_trigger
+        path: "{{ dest_path }}\\bin\\driver\\vuln_test.exe"
+        start_mode: auto
+
+    # Execute server Process in the this
+    - name: Set service to Vuln Target
+      win_command: "sc create WDM binPath= {{ dest_path + '/bin/driver/wdm.sys' | ansible.windows.quote }} type= kernel start= auto"
+      register: result_wdm
+      failed_when:
+        - result_wdm.rc != 0
+        - result_wdm.rc != 1073 # service already exists
+    # ## 스페이스바를 써야함...
+    # - name: HELLO

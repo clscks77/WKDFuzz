@@ -1,0 +1,7 @@
+vm_name = "win10"
+cpus = "4"
+disk_size = "65536"
+iso_url = "/home/udw/kAFL/iso/CVE-2022-32230/ko-kr_windows_11_business_editions_updated_march_2022_x64_dvd_b5ae45d4.iso"
+iso_checksum_type = "sha256"
+iso_checksum = "8b611a2932a28bd142b58d198f684831ddd359f8c38c2bdba999a70cd0350a54"
+autounattend = "answer_files/10/Autounattend.xml"
